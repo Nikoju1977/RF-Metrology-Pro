@@ -1,0 +1,71 @@
+name: Android APK and metrology tests
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'app/**'
+      - 'web/**'
+      - 'tests/**'
+      - '*.gradle'
+      - '.github/workflows/android.yml'
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: JVM agent tests
+        run: |
+          mkdir -p /tmp/niko-tests
+          javac -d /tmp/niko-tests app/src/main/java/fr/studioniko/network/{AgentEngine,RadioMath}.java tests/AgentTest.java
+          java -cp /tmp/niko-tests fr.studioniko.network.AgentTest
+      - name: Web engine tests
+        run: node web/test_engine.cjs
+      - name: Build Android debug APK
+        run: gradle --no-daemon :app:assembleDebug
+      - name: Verify APK signature
+        run: '"$ANDROID_HOME/build-tools/35.0.0/apksigner" verify app/build/outputs/apk/debug/app-debug.apk'
+      - run: cp app/build/outputs/apk/debug/app-debug.apk NIKO-Metrology-debug.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NIKO-Metrology-APK
+          path: NIKO-Metrology-debug.apk
+          if-no-files-found: error
+  release:
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: NIKO-Metrology-APK
+      - name: Publish verified development APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="v4.0.0-dev-$GITHUB_RUN_NUMBER"
+          fi
+          sha256sum NIKO-Metrology-debug.apk > NIKO-Metrology-debug.apk.sha256
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" NIKO-Metrology-debug.apk NIKO-Metrology-debug.apk.sha256 --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" NIKO-Metrology-debug.apk NIKO-Metrology-debug.apk.sha256 --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title "NIKO Metrology $TAG" --notes 'APK de développement signé avec une clé debug. Les mises à jour peuvent nécessiter une désinstallation. Test physique Android non garanti.'
+          fi
